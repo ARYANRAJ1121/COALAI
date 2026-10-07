@@ -13,17 +13,16 @@ around the pipeline functions.
 
 from __future__ import annotations
 
-import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coalai.accounting.service import confirm_pending
 from coalai.config import settings
-from coalai.db.session import get_db_session
+from coalai.db.session import get_db_session, get_session
 from coalai.gateway import pipeline
 from coalai.gateway.schemas import (
     ChatCompletionChunk,
@@ -40,8 +39,8 @@ from coalai.gateway.schemas import (
     StreamingDelta,
     UsageInfo,
 )
-from coalai.models.contracts import PipelineContext, FinishReason, utcnow
-from coalai.models.errors import COALAIError
+from coalai.models.contracts import PipelineContext, utcnow
+from coalai.models.errors import COALAIError, COALAIErrorType
 from coalai.observability.logging import clear_request_context, get_logger
 from coalai.providers.ollama import OllamaProvider
 from coalai.reliability.retry import RetryPolicy
@@ -54,18 +53,18 @@ _BEARER_PREFIX = "Bearer "
 
 
 def _extract_bearer_token(request: Request) -> str:
-    """Extract bearer token from Authorization header. Raises 401 on failure."""
+    """Extract bearer token from Authorization header. Raises COALAIError on failure."""
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith(_BEARER_PREFIX):
         raise COALAIError(
-            __import__("coalai.models.errors", fromlist=["COALAIErrorType"]).COALAIErrorType.AUTHENTICATION_FAILED,
+            COALAIErrorType.AUTHENTICATION_FAILED,
             "Missing or malformed Authorization header. Expected: Bearer <key>",
             http_status=401,
         )
     return auth_header[len(_BEARER_PREFIX):]
 
 
-def _coalai_error_to_json_response(exc: COALAIError, request_id: str | None) -> JSONResponse:
+def _error_response(exc: COALAIError, request_id: str | None) -> JSONResponse:
     return JSONResponse(
         status_code=exc.http_status,
         content=ErrorResponse(
@@ -80,11 +79,14 @@ def _coalai_error_to_json_response(exc: COALAIError, request_id: str | None) -> 
 
 def _get_provider(request: Request) -> OllamaProvider:
     """Retrieve the OllamaProvider singleton from app state."""
-    return request.app.state.ollama_provider
+    return request.app.state.ollama_provider  # type: ignore[no-any-return]
 
 
 def _get_retry_policy(request: Request) -> RetryPolicy:
-    return request.app.state.retry_policy
+    return request.app.state.retry_policy  # type: ignore[no-any-return]
+
+
+# ── Liveness & readiness ───────────────────────────────────────────────────────
 
 
 @router.get("/health", response_model=HealthResponse, tags=["observability"])
@@ -93,19 +95,19 @@ async def health() -> HealthResponse:
     return HealthResponse(version=settings.app_version)
 
 
-@router.get("/ready", response_model=ReadinessResponse, tags=["observability"])
-async def ready(session: AsyncSession = Depends(get_db_session)) -> ReadinessResponse:
+@router.get("/ready", tags=["observability"])
+async def ready(session: AsyncSession = Depends(get_db_session)) -> JSONResponse:
     """
     Readiness probe. Checks PostgreSQL and Redis connectivity.
-    Returns 200 only if both are reachable.
+    Returns 200 only when both are reachable.
     """
     from coalai.cache.redis_client import redis_ping
+    from sqlalchemy import text
 
     postgres_ok = False
     redis_ok = False
 
     try:
-        from sqlalchemy import text
         await session.execute(text("SELECT 1"))
         postgres_ok = True
     except Exception:
@@ -113,17 +115,18 @@ async def ready(session: AsyncSession = Depends(get_db_session)) -> ReadinessRes
 
     redis_ok = await redis_ping()
 
-    status_str = "ready" if (postgres_ok and redis_ok) else "not_ready"
     http_status = 200 if (postgres_ok and redis_ok) else 503
-
     return JSONResponse(
         status_code=http_status,
         content=ReadinessResponse(
-            status=status_str,
+            status="ready" if (postgres_ok and redis_ok) else "not_ready",
             postgres=postgres_ok,
             redis=redis_ok,
         ).model_dump(),
     )
+
+
+# ── Chat completions ───────────────────────────────────────────────────────────
 
 
 @router.post("/v1/chat/completions", tags=["completions"])
@@ -138,20 +141,19 @@ async def chat_completions(
     Supports both buffered (stream=false) and streaming (stream=true) modes.
     Returns structured JSON errors on all failure cases.
     """
-    raw_key: str | None = None
     ctx: PipelineContext | None = None
 
     try:
-        # Extract bearer token (before building context — no request_id yet)
+        # Extract bearer token (pre-auth — tenant_id NOT in logs yet)
         raw_key = _extract_bearer_token(request)
 
         # Stage 1: Build pipeline context
         ctx = pipeline.build_context(req)
 
-        # Stage 2: Auth
+        # Stage 2: Auth — after this, tenant_id is bound to log context
         await pipeline.run_auth(ctx, raw_key, session)
 
-        # Stage 3: Rate limiting
+        # Stage 3: Rate limiting (fail-open if Redis unavailable)
         await pipeline.run_rate_limit(ctx)
 
         # Stage 4: Resolve model
@@ -168,11 +170,11 @@ async def chat_completions(
     except COALAIError as exc:
         log.warning(
             "request_failed",
-            error_type=exc.error_type,
+            error_type=str(exc.error_type),
             http_status=exc.http_status,
             request_id=str(ctx.request_id) if ctx else None,
         )
-        return _coalai_error_to_json_response(exc, str(ctx.request_id) if ctx else None)
+        return _error_response(exc, str(ctx.request_id) if ctx else None)
 
     except Exception as exc:
         log.exception(
@@ -208,12 +210,15 @@ async def _handle_buffered(
     retry_policy: RetryPolicy,
     session: AsyncSession,
 ) -> JSONResponse:
-    """Handle a non-streaming chat completion."""
-    # Stage 5: Execute
+    """
+    Non-streaming completion.
+    Accounting write (CONFIRMED) happens BEFORE HTTP 200 is returned — v0.3 Option A.
+    """
+    # Stage 5: Execute with retry
     await pipeline.execute_completion(ctx, model, provider, retry_policy)
     assert ctx.result is not None
 
-    # Stage 6: Account (BEFORE returning to client — v0.3 Option A)
+    # Stage 6: Account — must succeed before responding
     await pipeline.run_accounting_confirmed(ctx, session)
     await session.commit()
 
@@ -259,30 +264,29 @@ async def _handle_streaming(
     session: AsyncSession,
 ) -> StreamingResponse:
     """
-    Handle a streaming chat completion.
+    Streaming completion via SSE.
 
-    Accounting phase 1 (PENDING write) happens BEFORE any chunk is sent.
-    Accounting phase 2 (CONFIRMED update) happens after the stream ends.
+    v0.3 Option A — two-phase accounting:
+      Phase 1: INSERT PENDING before first chunk (raises 503 if it fails).
+      Phase 2: UPDATE to CONFIRMED after stream ends (reconciliation handles failures).
     """
-    # Estimate input tokens for the PENDING accounting write.
-    # Simple character-count heuristic; accurate counts come from the stream's final chunk.
+    # Rough input-token estimate for the PENDING write (char count ÷ 4).
     estimated_input_tokens = sum(len(m.content) for m in ctx.messages) // 4
 
-    # Write PENDING accounting record BEFORE any chunk is sent.
-    # If this fails → raises COALAIError → returns 503 (caught in chat_completions)
+    # Phase 1: PENDING write — BEFORE any chunk reaches the client.
     event_id = await pipeline.run_accounting_pending(ctx, estimated_input_tokens, session)
     await session.commit()
 
-    # Get the stream iterator
-    stream_iter = await pipeline.execute_stream(ctx, model, provider)
+    # Resolve the stream coroutine before entering the generator.
+    stream_coro = pipeline.execute_stream(ctx, model, provider)
 
-    async def _sse_generator() -> AsyncIterator[str]:
-        """Yield SSE-formatted chunks, then confirm accounting after stream ends."""
+    async def _sse_generator() -> AsyncGenerator[str, None]:
         actual_input_tokens = 0
         actual_output_tokens = 0
 
         try:
-            async for chunk in await stream_iter:
+            # execute_stream returns a coroutine that returns an async iterator
+            async for chunk in await stream_coro:
                 if chunk.content:
                     sse_chunk = ChatCompletionChunk(
                         id=f"chatcmpl-{ctx.request_id}",
@@ -290,13 +294,14 @@ async def _handle_streaming(
                         choices=[
                             StreamingChoice(
                                 delta=StreamingDelta(content=chunk.content),
-                                finish_reason=chunk.finish_reason.value if chunk.finish_reason else None,
+                                finish_reason=(
+                                    chunk.finish_reason.value if chunk.finish_reason else None
+                                ),
                             )
                         ],
                     )
                     yield f"data: {sse_chunk.model_dump_json()}\n\n"
 
-                # Update token counts from final chunk
                 if chunk.input_tokens is not None:
                     actual_input_tokens = chunk.input_tokens
                 if chunk.output_tokens is not None:
@@ -305,10 +310,7 @@ async def _handle_streaming(
             yield "data: [DONE]\n\n"
 
         finally:
-            # Phase 2: confirm accounting after stream completes or errors
-            # This runs even on client disconnect (via generator cleanup)
-            from coalai.db.session import get_session
-
+            # Phase 2: confirm accounting — uses a fresh session (request session may be closed)
             async with get_session() as confirm_session:
                 await confirm_pending(
                     event_id,
