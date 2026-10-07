@@ -7,7 +7,7 @@ name = "coalai"
 version = "0.1.0"
 description = "Cost-Optimized AI Infrastructure — Production-grade AI execution infrastructure for reliable, cost-aware LLM and agent workloads."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
@@ -28,12 +28,17 @@ dev = [
     "respx>=0.21.1",
     "pytest-cov>=5.0.0",
     "fakeredis[aioredis]>=2.26.0",
+    "anyio>=4.0.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "integration: marks tests that require real infrastructure (Postgres, Redis)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/coalai"]
