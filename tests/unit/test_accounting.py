@@ -38,7 +38,7 @@ def make_ctx_with_result(pipeline_ctx: MagicMock) -> MagicMock:
     result.output_tokens = 5
     result.finish_reason = FinishReason.STOP
     pipeline_ctx.result = result
-    pipeline_ctx.estimated_cost_usd = 0.0
+    # estimated_cost_usd is a computed @property — cannot be set directly
     pipeline_ctx.trace_id = "abc123"
     pipeline_ctx.exact_cache_hit = False
     return pipeline_ctx
