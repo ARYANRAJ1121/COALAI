@@ -71,12 +71,9 @@ async def redis_get(key: str, *, use_case: str) -> str | None:
             timeout=settings.redis_timeout_seconds,
         )
     except (RedisError, ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
-        log.warning(
-            "redis_get_failed",
-            use_case=use_case,
-            key=key,
-            error=str(exc),
-        )
+        from coalai.observability.metrics import record_redis_failure
+        record_redis_failure(use_case=use_case, operation="get")
+        log.warning("redis_get_failed", use_case=use_case, key=key, error=str(exc))
         return None
 
 
@@ -97,12 +94,9 @@ async def redis_set(
         )
         return True
     except (RedisError, ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
-        log.warning(
-            "redis_set_failed",
-            use_case=use_case,
-            key=key,
-            error=str(exc),
-        )
+        from coalai.observability.metrics import record_redis_failure
+        record_redis_failure(use_case=use_case, operation="set")
+        log.warning("redis_set_failed", use_case=use_case, key=key, error=str(exc))
         return False
 
 
@@ -114,6 +108,8 @@ async def redis_delete(key: str, *, use_case: str) -> None:
             timeout=settings.redis_timeout_seconds,
         )
     except (RedisError, ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
+        from coalai.observability.metrics import record_redis_failure
+        record_redis_failure(use_case=use_case, operation="delete")
         log.warning("redis_delete_failed", use_case=use_case, key=key, error=str(exc))
 
 
@@ -138,12 +134,9 @@ async def redis_incr_with_expire(
         )
         return int(results[0])
     except (RedisError, ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
-        log.warning(
-            "redis_incr_failed",
-            use_case=use_case,
-            key=key,
-            error=str(exc),
-        )
+        from coalai.observability.metrics import record_redis_failure
+        record_redis_failure(use_case=use_case, operation="incr")
+        log.warning("redis_incr_failed", use_case=use_case, key=key, error=str(exc))
         return None
 
 
