@@ -17,7 +17,7 @@ import uuid
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coalai.accounting.service import confirm_pending
@@ -42,6 +42,7 @@ from coalai.gateway.schemas import (
 from coalai.models.contracts import PipelineContext, utcnow
 from coalai.models.errors import COALAIError, COALAIErrorType
 from coalai.observability.logging import clear_request_context, get_logger
+from coalai.observability.metrics import get_metrics_response, record_request_complete
 from coalai.providers.ollama import OllamaProvider
 from coalai.reliability.retry import RetryPolicy
 
@@ -87,6 +88,13 @@ def _get_retry_policy(request: Request) -> RetryPolicy:
 
 
 # ── Liveness & readiness ───────────────────────────────────────────────────────
+
+
+@router.get("/metrics", tags=["observability"], include_in_schema=False)
+async def metrics() -> Response:
+    """Prometheus scrape endpoint."""
+    content, content_type = get_metrics_response()
+    return Response(content=content, media_type=content_type)
 
 
 @router.get("/health", response_model=HealthResponse, tags=["observability"])
@@ -143,6 +151,8 @@ async def chat_completions(
     """
     ctx: PipelineContext | None = None
 
+    from coalai.observability.metrics import active_requests
+    active_requests.inc()
     try:
         # Extract bearer token (pre-auth — tenant_id NOT in logs yet)
         raw_key = _extract_bearer_token(request)
@@ -193,8 +203,13 @@ async def chat_completions(
             ).model_dump(),
         )
     finally:
+        active_requests.dec()
         if ctx:
             ctx.responded_at = utcnow()
+            status = "success" if ctx.http_status == 200 else (
+                str(ctx._last_error_type) if hasattr(ctx, "_last_error_type") else "error"
+            )
+            record_request_complete(ctx, status=status)
             log.info(
                 "request_completed",
                 http_status=ctx.http_status,

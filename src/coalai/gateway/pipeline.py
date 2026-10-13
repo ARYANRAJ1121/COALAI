@@ -30,6 +30,7 @@ from coalai.accounting.service import (
     write_confirmed,
     write_pending,
 )
+from coalai.observability import metrics as m
 from coalai.auth.service import verify_api_key
 from coalai.cache.redis_client import redis_incr_with_expire
 from coalai.config import settings
@@ -146,6 +147,7 @@ async def run_rate_limit(ctx: PipelineContext) -> None:
         return
 
     if count > rpm_limit:
+        m.record_rate_limit_exceeded(tenant_id=tenant_id)
         log.warning(
             "rate_limit_exceeded",
             tenant_id=tenant_id,
