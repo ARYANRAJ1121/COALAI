@@ -1,0 +1,348 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+    { "type": "panel", "id": "gauge", "name": "Gauge", "version": "" }
+  ],
+  "annotations": { "list": [] },
+  "description": "COALAI — Cost-Optimized AI Infrastructure observability dashboard",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "🔵 Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "reqps",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_requests_total[1m])) by (status)",
+          "legendFormat": "{{ status }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Requests / second (by status)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "reqps", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_requests_total[1m])) by (provider)",
+          "legendFormat": "{{ provider }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Requests / second (by provider)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "fixedColor": "green", "mode": "fixed" }, "unit": "short" }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 9 },
+      "id": 10,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background" },
+      "targets": [
+        { "expr": "coalai_active_requests", "legendFormat": "Active", "refId": "A" }
+      ],
+      "title": "Active Requests",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "fixedColor": "blue", "mode": "fixed" }, "unit": "short" }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 9 },
+      "id": 11,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "background" },
+      "targets": [
+        { "expr": "sum(increase(coalai_requests_total[24h]))", "legendFormat": "Total", "refId": "A" }
+      ],
+      "title": "Requests (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "fixedColor": "red", "mode": "fixed" }, "unit": "percentunit" }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 9 },
+      "id": 12,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "background" },
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_requests_total{status!=\"success\"}[5m])) / sum(rate(coalai_requests_total[5m]))",
+          "legendFormat": "Error rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Rate (5m)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "id": 101,
+      "title": "⏱ Latency",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "s", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 20,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(coalai_request_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "p50 {{ provider }}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(coalai_request_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "p95 {{ provider }}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(coalai_request_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "p99 {{ provider }}",
+          "refId": "C"
+        }
+      ],
+      "title": "End-to-end Latency — p50 / p95 / p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "s", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 21,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(coalai_provider_latency_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "p50 {{ provider }}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(coalai_provider_latency_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "p95 {{ provider }}",
+          "refId": "B"
+        }
+      ],
+      "title": "Provider Latency — p50 / p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "s", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "id": 22,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(coalai_ttft_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "p50 TTFT {{ provider }}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(coalai_ttft_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "p95 TTFT {{ provider }}",
+          "refId": "B"
+        }
+      ],
+      "title": "Time-to-First-Token (streaming) — p50 / p95",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+      "id": 102,
+      "title": "🪙 Tokens & Cost",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2, "fillOpacity": 5 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "id": 30,
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_tokens_total{token_type=\"input\"}[5m])) by (model)",
+          "legendFormat": "input {{ model }}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(coalai_tokens_total{token_type=\"output\"}[5m])) by (model)",
+          "legendFormat": "output {{ model }}",
+          "refId": "B"
+        }
+      ],
+      "title": "Tokens / second (input vs output)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "id": 31,
+      "targets": [
+        {
+          "expr": "sum(increase(coalai_tokens_total[24h])) by (token_type)",
+          "legendFormat": "{{ token_type }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Tokens (24h)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "id": 103,
+      "title": "⚠️ Errors & Reliability",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "id": 40,
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_provider_errors_total[5m])) by (provider, error_type)",
+          "legendFormat": "{{ provider }} — {{ error_type }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider Errors / second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "id": 41,
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_retry_attempts_total[5m])) by (provider, error_type)",
+          "legendFormat": "{{ provider }} — {{ error_type }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Retry Attempts / second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "id": 42,
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_redis_failures_total[5m])) by (use_case, operation)",
+          "legendFormat": "{{ use_case }}/{{ operation }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Redis Fail-Open Incidents / second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "id": 43,
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_accounting_failures_total[5m])) by (phase)",
+          "legendFormat": "phase={{ phase }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Accounting Write Failures / second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "id": 44,
+      "targets": [
+        {
+          "expr": "sum(rate(coalai_rate_limit_exceeded_total[5m])) by (tenant_id)",
+          "legendFormat": "tenant={{ tenant_id }}",
+          "refId": "A"
+        }
+      ],
+      "title": "Rate Limit Rejections / second",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["coalai", "llm", "ai-infrastructure"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "COALAI — Observability",
+  "uid": "coalai-main",
+  "version": 1
+}
