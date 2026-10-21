@@ -45,8 +45,11 @@ from coalai.models.contracts import (
 )
 from coalai.models.errors import COALAIError, COALAIErrorType
 from coalai.observability.logging import bind_request_context, get_logger
+from coalai.providers.base import LLMProvider
 from coalai.providers.ollama import OllamaProvider
+from coalai.providers.registry import RouteTarget
 from coalai.reliability.retry import RetryPolicy, retry_with_backoff
+from coalai.reliability.routing import FallbackRouter
 
 log = get_logger(__name__)
 
@@ -181,14 +184,41 @@ def resolve_model(ctx: PipelineContext) -> str:
 
 async def execute_completion(
     ctx: PipelineContext,
-    model: str,
-    provider: OllamaProvider,
-    policy: RetryPolicy,
+    model: str | None = None,
+    provider: LLMProvider | None = None,
+    policy: RetryPolicy | None = None,
+    *,
+    targets: list[RouteTarget] | None = None,
+    router: FallbackRouter | None = None,
 ) -> None:
     """
-    Call the provider with retry. Populates ctx.result and ctx.all_attempts.
-    Raises COALAIError if all attempts are exhausted.
+    Execute completion across target routes with circuit breaker and fallback.
+    Maintains backwards-compatibility with direct (model, provider, policy) signatures.
     """
+    if router is not None and targets:
+        result, target_used = await router.execute(
+            ctx,
+            targets,
+            timeout_seconds=settings.provider_timeout_seconds,
+        )
+        ctx.result = result
+        ctx.all_attempts.append(result)
+        log.info(
+            "execution_completed",
+            model=target_used.model,
+            provider=target_used.provider_id,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            latency_ms=round(result.provider_latency_ms, 1),
+        )
+        return
+
+    # Direct single-provider execution fallback
+    assert provider is not None, "Either (router, targets) or (provider, model) must be provided"
+    assert model is not None
+    if policy is None:
+        policy = RetryPolicy.from_settings()
+
     normalized_req = NormalizedRequest(
         messages=ctx.messages,
         model=model,
@@ -235,14 +265,24 @@ async def execute_completion(
 
 async def execute_stream(
     ctx: PipelineContext,
-    model: str,
-    provider: OllamaProvider,
+    model: str | None = None,
+    provider: LLMProvider | None = None,
+    *,
+    targets: list[RouteTarget] | None = None,
+    router: FallbackRouter | None = None,
 ) -> AsyncIterator[NormalizedChunk]:
     """
-    Execute a streaming provider call.
-    Returns an async iterator of NormalizedChunk objects.
-    The caller (router.py) handles accounting around this iterator.
+    Execute streaming completion across target routes with circuit breaker and fallback.
     """
+    if router is not None and targets:
+        return await router.stream(
+            ctx,
+            targets,
+            timeout_seconds=settings.provider_streaming_timeout_seconds,
+        )
+
+    assert provider is not None
+    assert model is not None
     normalized_req = NormalizedRequest(
         messages=ctx.messages,
         model=model,
@@ -254,10 +294,7 @@ async def execute_stream(
         seed=ctx.seed,
     )
 
-    # Streaming retries are not applied at the chunk level in Milestone 1.
-    # If streaming fails before the first chunk, the accounting PENDING write
-    # has not been committed yet — the caller should not retry from mid-stream.
-    return provider.stream(
+    return await provider.stream(
         normalized_req,
         timeout_seconds=settings.provider_streaming_timeout_seconds,
     )

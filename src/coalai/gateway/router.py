@@ -44,7 +44,9 @@ from coalai.models.errors import COALAIError, COALAIErrorType
 from coalai.observability.logging import clear_request_context, get_logger
 from coalai.observability.metrics import get_metrics_response, record_request_complete
 from coalai.providers.ollama import OllamaProvider
+from coalai.providers.registry import ProviderRegistry, RouteTarget
 from coalai.reliability.retry import RetryPolicy
+from coalai.reliability.routing import FallbackRouter
 
 log = get_logger(__name__)
 
@@ -85,6 +87,14 @@ def _get_provider(request: Request) -> OllamaProvider:
 
 def _get_retry_policy(request: Request) -> RetryPolicy:
     return request.app.state.retry_policy  # type: ignore[no-any-return]
+
+
+def _get_fallback_router(request: Request) -> FallbackRouter | None:
+    return getattr(request.app.state, "fallback_router", None)
+
+
+def _get_provider_registry(request: Request) -> ProviderRegistry | None:
+    return getattr(request.app.state, "provider_registry", None)
 
 
 # ── Liveness & readiness ───────────────────────────────────────────────────────
@@ -166,16 +176,38 @@ async def chat_completions(
         # Stage 3: Rate limiting (fail-open if Redis unavailable)
         await pipeline.run_rate_limit(ctx)
 
-        # Stage 4: Resolve model
+        # Stage 4: Resolve model & targets
         model = pipeline.resolve_model(ctx)
+        registry = _get_provider_registry(request)
+        fallback_router = _get_fallback_router(request)
+
+        if registry is not None:
+            targets = registry.resolve_targets(ctx.model_hint)
+        else:
+            targets = [RouteTarget(provider_id="ollama", model=model)]
 
         provider = _get_provider(request)
         retry_policy = _get_retry_policy(request)
 
         if not req.stream:
-            return await _handle_buffered(ctx, model, provider, retry_policy, session)
+            return await _handle_buffered(
+                ctx=ctx,
+                model=model,
+                targets=targets,
+                provider=provider,
+                retry_policy=retry_policy,
+                router=fallback_router,
+                session=session,
+            )
         else:
-            return await _handle_streaming(ctx, model, provider, session)
+            return await _handle_streaming(
+                ctx=ctx,
+                model=model,
+                targets=targets,
+                provider=provider,
+                router=fallback_router,
+                session=session,
+            )
 
     except COALAIError as exc:
         log.warning(
@@ -221,16 +253,25 @@ async def chat_completions(
 async def _handle_buffered(
     ctx: PipelineContext,
     model: str,
+    targets: list[RouteTarget],
     provider: OllamaProvider,
     retry_policy: RetryPolicy,
+    router: FallbackRouter | None,
     session: AsyncSession,
 ) -> JSONResponse:
     """
     Non-streaming completion.
     Accounting write (CONFIRMED) happens BEFORE HTTP 200 is returned — v0.3 Option A.
     """
-    # Stage 5: Execute with retry
-    await pipeline.execute_completion(ctx, model, provider, retry_policy)
+    # Stage 5: Execute with circuit breaker & fallback router
+    await pipeline.execute_completion(
+        ctx,
+        model=model,
+        provider=provider,
+        policy=retry_policy,
+        targets=targets,
+        router=router,
+    )
     assert ctx.result is not None
 
     # Stage 6: Account — must succeed before responding
@@ -238,6 +279,14 @@ async def _handle_buffered(
     await session.commit()
 
     ctx.http_status = 200
+
+    fallback_triggered = bool(
+        targets
+        and (
+            ctx.result.provider_used != targets[0].provider_id
+            or ctx.result.model_used != targets[0].model
+        )
+    )
 
     response = ChatCompletionResponse(
         id=f"chatcmpl-{ctx.request_id}",
@@ -258,7 +307,7 @@ async def _handle_buffered(
             trace_id=ctx.trace_id,
             provider_used=ctx.result.provider_used,
             model_used=ctx.result.model_used,
-            fallback_triggered=False,
+            fallback_triggered=fallback_triggered,
             attempt_number=ctx.result.attempt_number,
             cache_hit=False,
             cache_type=None,
@@ -275,7 +324,9 @@ async def _handle_buffered(
 async def _handle_streaming(
     ctx: PipelineContext,
     model: str,
+    targets: list[RouteTarget],
     provider: OllamaProvider,
+    router: FallbackRouter | None,
     session: AsyncSession,
 ) -> StreamingResponse:
     """
@@ -293,15 +344,20 @@ async def _handle_streaming(
     await session.commit()
 
     # Resolve the stream coroutine before entering the generator.
-    stream_coro = pipeline.execute_stream(ctx, model, provider)
+    stream_iter = await pipeline.execute_stream(
+        ctx,
+        model=model,
+        provider=provider,
+        targets=targets,
+        router=router,
+    )
 
     async def _sse_generator() -> AsyncGenerator[str, None]:
         actual_input_tokens = 0
         actual_output_tokens = 0
 
         try:
-            # execute_stream returns a coroutine that returns an async iterator
-            async for chunk in await stream_coro:
+            async for chunk in stream_iter:
                 if chunk.content:
                     sse_chunk = ChatCompletionChunk(
                         id=f"chatcmpl-{ctx.request_id}",

@@ -28,7 +28,10 @@ from coalai.gateway.schemas import ErrorDetail, ErrorResponse
 from coalai.models.errors import COALAIError
 from coalai.observability.logging import configure_logging, get_logger
 from coalai.providers.ollama import OllamaProvider
+from coalai.providers.registry import ProviderRegistry
+from coalai.reliability.circuit_breaker import CircuitBreaker
 from coalai.reliability.retry import RetryPolicy
+from coalai.reliability.routing import FallbackRouter
 
 log = get_logger(__name__)
 
@@ -47,12 +50,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
     init_redis()
 
-    # Create provider singleton and retry policy
-    app.state.ollama_provider = OllamaProvider(
+    # Create provider singleton, circuit breaker, registry, and router
+    provider_registry = ProviderRegistry()
+    circuit_breaker = CircuitBreaker()
+    retry_policy = RetryPolicy.from_settings()
+
+    ollama = OllamaProvider(
         base_url=settings.ollama_base_url,
         default_model=settings.ollama_default_model,
     )
-    app.state.retry_policy = RetryPolicy.from_settings()
+    provider_registry.register_provider(ollama)
+
+    fallback_router = FallbackRouter(
+        registry=provider_registry,
+        circuit_breaker=circuit_breaker,
+        retry_policy=retry_policy,
+    )
+
+    app.state.provider_registry = provider_registry
+    app.state.circuit_breaker = circuit_breaker
+    app.state.retry_policy = retry_policy
+    app.state.ollama_provider = ollama
+    app.state.fallback_router = fallback_router
 
     log.info(
         "coalai_started",
