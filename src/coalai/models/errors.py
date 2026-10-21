@@ -22,6 +22,7 @@ class COALAIErrorType(StrEnum):
     PROVIDER_BAD_REQUEST = "provider_bad_request"
     PROVIDER_MALFORMED_RESPONSE = "provider_malformed_response"
     ALL_PROVIDERS_FAILED = "all_providers_failed"
+    CIRCUIT_BREAKER_OPEN = "circuit_breaker_open"
 
     # ── Gateway / client errors ───────────────────────────────────────────────
     AUTHENTICATION_FAILED = "authentication_failed"
@@ -47,6 +48,7 @@ _DEFAULT_HTTP_STATUS: dict[COALAIErrorType, int] = {
     COALAIErrorType.PROVIDER_BAD_REQUEST: 400,
     COALAIErrorType.PROVIDER_MALFORMED_RESPONSE: 502,
     COALAIErrorType.ALL_PROVIDERS_FAILED: 503,
+    COALAIErrorType.CIRCUIT_BREAKER_OPEN: 503,
     COALAIErrorType.AUTHENTICATION_FAILED: 401,
     COALAIErrorType.AUTHORIZATION_FAILED: 403,
     COALAIErrorType.VALIDATION_ERROR: 422,
@@ -61,6 +63,7 @@ _RETRYABLE: dict[COALAIErrorType, bool] = {
     COALAIErrorType.PROVIDER_TIMEOUT: True,
     COALAIErrorType.PROVIDER_RATE_LIMITED: True,
     COALAIErrorType.PROVIDER_SERVER_ERROR: True,
+    COALAIErrorType.CIRCUIT_BREAKER_OPEN: True,
     COALAIErrorType.PROVIDER_AUTH_FAILURE: False,
     COALAIErrorType.PROVIDER_BAD_REQUEST: False,
     COALAIErrorType.PROVIDER_MALFORMED_RESPONSE: False,

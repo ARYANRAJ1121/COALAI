@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # Fraction of computed delay used as random jitter band (±).
     retry_jitter_factor: float = 0.25
 
+    # ── Circuit Breaker ───────────────────────────────────────────────────────
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_time_seconds: float = 30.0
+    circuit_breaker_half_open_success_threshold: int = 2
+    circuit_breaker_half_open_max_trials: int = 2
+    circuit_breaker_canary_timeout_seconds: float = 10.0
+
     # ── Auth ──────────────────────────────────────────────────────────────────
     # How long a verified TenantContext is cached in Redis before re-validation.
     api_key_cache_ttl_seconds: int = 300
