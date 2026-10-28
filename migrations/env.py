@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # Alembic Config object — gives access to values in alembic.ini
 config = context.config
 
+from coalai.config import settings  # noqa: E402
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

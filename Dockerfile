@@ -16,7 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies before copying source
 # (layer caching: deps change less often than source)
-COPY pyproject.toml .
+COPY pyproject.toml README.md ./
+COPY src ./src
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e ".[dev]"
 
@@ -38,5 +39,4 @@ CMD ["sh", "-c", "\
         --host 0.0.0.0 \
         --port 8000 \
         --workers 2 \
-        --log-config /dev/null \
 "]
