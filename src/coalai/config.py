@@ -39,6 +39,18 @@ class Settings(BaseSettings):
     # Default model used when the client does not specify one.
     ollama_default_model: str = "llama3.2:3b"
 
+    # ── Groq (free tier cloud inference) ──────────────────────────────────────
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com"
+    groq_default_model: str = "llama-3.1-8b-instant"
+    groq_enabled: bool = False
+
+    # ── OpenRouter (free model aggregator) ────────────────────────────────────
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai"
+    openrouter_default_model: str = "meta-llama/llama-3.1-8b-instruct:free"
+    openrouter_enabled: bool = False
+
     # ── Reliability ───────────────────────────────────────────────────────────
     provider_timeout_seconds: float = 30.0
     provider_streaming_timeout_seconds: float = 300.0

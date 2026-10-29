@@ -27,8 +27,10 @@ from coalai.gateway.router import router
 from coalai.gateway.schemas import ErrorDetail, ErrorResponse
 from coalai.models.errors import COALAIError
 from coalai.observability.logging import configure_logging, get_logger
+from coalai.providers.groq import GroqProvider
 from coalai.providers.ollama import OllamaProvider
-from coalai.providers.registry import ProviderRegistry
+from coalai.providers.openrouter import OpenRouterProvider
+from coalai.providers.registry import ProviderRegistry, RouteTarget
 from coalai.reliability.circuit_breaker import CircuitBreaker
 from coalai.reliability.retry import RetryPolicy
 from coalai.reliability.routing import FallbackRouter
@@ -55,11 +57,50 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     circuit_breaker = CircuitBreaker()
     retry_policy = RetryPolicy.from_settings()
 
+    # ── Tier 1: Ollama (local, always enabled) ────────────────────────────────
     ollama = OllamaProvider(
         base_url=settings.ollama_base_url,
         default_model=settings.ollama_default_model,
     )
     provider_registry.register_provider(ollama)
+
+    # ── Tier 2: Groq (cloud, free tier, opt-in) ──────────────────────────────
+    groq: GroqProvider | None = None
+    if settings.groq_enabled and settings.groq_api_key:
+        groq = GroqProvider(
+            api_key=settings.groq_api_key,
+            base_url=settings.groq_base_url,
+            default_model=settings.groq_default_model,
+        )
+        provider_registry.register_provider(groq)
+        log.info("groq_provider_registered", default_model=settings.groq_default_model)
+
+    # ── Tier 3: OpenRouter (cloud, free models, opt-in) ──────────────────────
+    openrouter: OpenRouterProvider | None = None
+    if settings.openrouter_enabled and settings.openrouter_api_key:
+        openrouter = OpenRouterProvider(
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            default_model=settings.openrouter_default_model,
+        )
+        provider_registry.register_provider(openrouter)
+        log.info("openrouter_provider_registered", default_model=settings.openrouter_default_model)
+
+    # ── Build default fallback route chains ────────────────────────────────────
+    # Route "default" and common model aliases through the full failover chain.
+    # Primary: Ollama (local) → Fallback: Groq → Emergency: OpenRouter
+    default_targets: list[RouteTarget] = [
+        RouteTarget(provider_id="ollama", model=settings.ollama_default_model),
+    ]
+    if groq is not None:
+        default_targets.append(
+            RouteTarget(provider_id="groq", model=settings.groq_default_model),
+        )
+    if openrouter is not None:
+        default_targets.append(
+            RouteTarget(provider_id="openrouter", model=settings.openrouter_default_model),
+        )
+    provider_registry.register_route("default", default_targets)
 
     fallback_router = FallbackRouter(
         registry=provider_registry,
@@ -73,17 +114,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ollama_provider = ollama
     app.state.fallback_router = fallback_router
 
+    active_providers = ["ollama"]
+    if groq is not None:
+        active_providers.append("groq")
+    if openrouter is not None:
+        active_providers.append("openrouter")
+
     log.info(
         "coalai_started",
         ollama_base_url=settings.ollama_base_url,
         default_model=settings.ollama_default_model,
+        active_providers=active_providers,
+        fallback_chain_length=len(default_targets),
     )
 
     yield  # ← Application is running
 
     # Teardown
     log.info("coalai_shutting_down")
-    await app.state.ollama_provider.close()
+    await ollama.close()
+    if groq is not None:
+        await groq.close()
+    if openrouter is not None:
+        await openrouter.close()
     await close_db()
     await close_redis()
     log.info("coalai_stopped")
