@@ -34,6 +34,7 @@ from coalai.observability.metrics import (
     active_requests,
     get_metrics_response,
     provider_errors_total,
+    provider_latency_seconds,
     rate_limit_exceeded_total,
     record_accounting_failure,
     record_provider_error,
@@ -45,6 +46,7 @@ from coalai.observability.metrics import (
     requests_total,
     retry_attempts_total,
     tokens_total,
+    ttft_seconds,
 )
 
 
@@ -133,6 +135,75 @@ def test_record_request_complete_increments_token_counters() -> None:
 
     assert after_in == before_in + 20
     assert after_out == before_out + 8
+
+
+def test_record_request_complete_records_stream_route_tokens_and_timings() -> None:
+    """Stream metrics use the selected fallback target and stream usage fields."""
+    from datetime import timedelta
+
+    ctx = _make_pipeline_ctx(stream=True)
+    ctx.result = None
+    ctx.selected_provider = "groq"
+    ctx.selected_model = "llama-3.1-8b-instant"
+    ctx.provider_started_at = ctx.received_at + timedelta(milliseconds=50)
+    ctx.first_token_at = ctx.received_at + timedelta(milliseconds=250)
+    ctx.provider_completed_at = ctx.received_at + timedelta(seconds=1)
+    ctx.responded_at = ctx.received_at + timedelta(milliseconds=1100)
+    ctx.stream_input_tokens = 20
+    ctx.stream_output_tokens = 8
+
+    tenant_id = str(ctx.tenant_id)
+    request_before = requests_total.labels(
+        tenant_id=tenant_id,
+        model=ctx.selected_model,
+        provider=ctx.selected_provider,
+        status="success",
+    )._value.get()
+    input_before = tokens_total.labels(
+        tenant_id=tenant_id,
+        model=ctx.selected_model,
+        provider=ctx.selected_provider,
+        token_type="input",
+    )._value.get()
+    output_before = tokens_total.labels(
+        tenant_id=tenant_id,
+        model=ctx.selected_model,
+        provider=ctx.selected_provider,
+        token_type="output",
+    )._value.get()
+    provider_sum_before = provider_latency_seconds.labels(
+        provider=ctx.selected_provider, model=ctx.selected_model
+    )._sum.get()
+    ttft_sum_before = ttft_seconds.labels(
+        provider=ctx.selected_provider, model=ctx.selected_model
+    )._sum.get()
+
+    record_request_complete(ctx, status="success")
+
+    assert requests_total.labels(
+        tenant_id=tenant_id,
+        model=ctx.selected_model,
+        provider=ctx.selected_provider,
+        status="success",
+    )._value.get() == request_before + 1
+    assert tokens_total.labels(
+        tenant_id=tenant_id,
+        model=ctx.selected_model,
+        provider=ctx.selected_provider,
+        token_type="input",
+    )._value.get() == input_before + 20
+    assert tokens_total.labels(
+        tenant_id=tenant_id,
+        model=ctx.selected_model,
+        provider=ctx.selected_provider,
+        token_type="output",
+    )._value.get() == output_before + 8
+    assert provider_latency_seconds.labels(
+        provider=ctx.selected_provider, model=ctx.selected_model
+    )._sum.get() == pytest.approx(provider_sum_before + 0.95)
+    assert ttft_seconds.labels(
+        provider=ctx.selected_provider, model=ctx.selected_model
+    )._sum.get() == pytest.approx(ttft_sum_before + 0.2)
 
 
 def test_record_request_complete_never_raises_on_broken_ctx() -> None:

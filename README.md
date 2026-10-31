@@ -103,8 +103,8 @@ COALAI/
 ├── scripts/
 │   └── provision.py               # CLI: create tenants + issue API keys
 ├── tests/
-│   ├── unit/                      # 28 test cases, no infrastructure required
-│   └── integration/               # Full Iron Path end-to-end tests
+│   ├── unit/                      # Unit tests; no infrastructure required
+│   └── integration/               # PostgreSQL-backed gateway tests; Ollama is mocked
 ├── Dockerfile
 ├── docker-compose.yml
 └── pyproject.toml
@@ -331,7 +331,7 @@ python scripts/provision.py issue-key --tenant-id <uuid> --label "prod-server"
 # Unit tests — no infrastructure needed
 pytest tests/unit/ -v
 
-# Integration tests — requires Postgres + Redis (docker compose up -d)
+# Integration tests — requires PostgreSQL; Ollama is mocked
 pytest tests/integration/ -v -m integration
 
 # All tests with coverage

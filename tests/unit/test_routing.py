@@ -7,6 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from coalai.models.contracts import (
@@ -208,3 +209,56 @@ async def test_all_targets_fail_raises_all_providers_failed(router_setup, sample
         await router.execute(sample_context, targets, timeout_seconds=5.0)
 
     assert exc_info.value.error_type == COALAIErrorType.ALL_PROVIDERS_FAILED
+
+
+async def _stream_chunks(*chunks: NormalizedChunk) -> AsyncIterator[NormalizedChunk]:
+    for chunk in chunks:
+        yield chunk
+
+
+@pytest.mark.asyncio
+async def test_stream_falls_back_before_first_chunk_and_records_selected_target(
+    router_setup, sample_context: PipelineContext
+) -> None:
+    router, _, _, p1, p2 = router_setup
+    p1.stream_mock.side_effect = COALAIError(COALAIErrorType.PROVIDER_TIMEOUT, "Primary down")
+    p2.stream_mock.return_value = _stream_chunks(
+        NormalizedChunk(content="fallback", finish_reason=FinishReason.STOP)
+    )
+    targets = [RouteTarget("p1", "model-a"), RouteTarget("p2", "model-b")]
+
+    stream = await router.stream(sample_context, targets, timeout_seconds=5.0)
+    chunks = [chunk async for chunk in stream]
+
+    assert [chunk.content for chunk in chunks] == ["fallback"]
+    assert sample_context.selected_provider == "p2"
+    assert sample_context.selected_model == "model-b"
+    assert p2.stream_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_retryable_failure_opens_target_breaker(
+    fast_retry_policy: RetryPolicy, sample_context: PipelineContext
+) -> None:
+    registry = ProviderRegistry()
+    breaker = CircuitBreaker(config=CircuitBreakerConfig(failure_threshold=1))
+    router = FallbackRouter(registry, breaker, fast_retry_policy)
+    provider = MockProvider("p1")
+    registry.register_provider(provider)
+
+    async def failing_stream() -> AsyncIterator[NormalizedChunk]:
+        yield NormalizedChunk(content="partial", finish_reason=None)
+        raise COALAIError(COALAIErrorType.PROVIDER_SERVER_ERROR, "Failed mid-stream")
+
+    provider.stream_mock.return_value = failing_stream()
+    stream = await router.stream(
+        sample_context,
+        [RouteTarget("p1", "model-a")],
+        timeout_seconds=5.0,
+    )
+
+    assert (await stream.__anext__()).content == "partial"
+    with pytest.raises(COALAIError, match="Failed mid-stream"):
+        await stream.__anext__()
+
+    assert breaker.can_execute("p1:model-a") is None

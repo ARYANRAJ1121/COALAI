@@ -34,12 +34,12 @@ import httpx
 import pytest
 import pytest_asyncio
 import respx
-from fastapi.testclient import TestClient
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from coalai.db.models import AccountingLedger, ApiKey, Tenant, Base
+from coalai.config import settings
+from coalai.db.models import AccountingLedger, ApiKey, Base, Tenant
 from coalai.main import create_app
 
 # ── Skip marker ───────────────────────────────────────────────────────────────
@@ -55,8 +55,9 @@ pytestmark = pytest.mark.integration
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
-@pytest_asyncio.fixture(scope="module")
-async def test_engine():
+@pytest_asyncio.fixture
+async def test_engine(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(settings, "database_url", TEST_DB_URL)
     engine = create_async_engine(TEST_DB_URL, echo=False)
     try:
         async with engine.begin() as conn:
@@ -69,6 +70,16 @@ async def test_engine():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def api_client(test_engine) -> AsyncGenerator[AsyncClient, None]:
+    """Run the app lifespan against the test database over HTTPX ASGI transport."""
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
 
 
 @pytest_asyncio.fixture
@@ -123,7 +134,11 @@ MOCK_OLLAMA_RESPONSE = {
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_full_iron_path(provisioned_key: dict, db_session: AsyncSession) -> None:
+async def test_full_iron_path(
+    provisioned_key: dict,
+    db_session: AsyncSession,
+    api_client: AsyncClient,
+) -> None:
     """
     Full iron path: auth → validate → execute (mocked Ollama) → account → respond.
 
@@ -134,18 +149,14 @@ async def test_full_iron_path(provisioned_key: dict, db_session: AsyncSession) -
       - accounting_ledger has exactly one CONFIRMED row
       - Token counts in ledger match provider response
     """
-    respx.post("http://ollama:11434/v1/chat/completions").mock(
+    respx.post(f"{settings.ollama_base_url.rstrip('/')}/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=MOCK_OLLAMA_RESPONSE)
     )
-
-    app = create_app()
-
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "Hello"}], "model": "llama3.2:3b"},
-            headers={"Authorization": f"Bearer {provisioned_key['raw_key']}"},
-        )
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Hello"}], "model": "llama3.2:3b"},
+        headers={"Authorization": f"Bearer {provisioned_key['raw_key']}"},
+    )
 
     assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
     data = response.json()
@@ -176,16 +187,13 @@ async def test_full_iron_path(provisioned_key: dict, db_session: AsyncSession) -
 
 
 @pytest.mark.asyncio
-async def test_invalid_api_key_returns_401() -> None:
+async def test_invalid_api_key_returns_401(api_client: AsyncClient) -> None:
     """Request with an invalid API key returns 401."""
-    app = create_app()
-
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "Hi"}]},
-            headers={"Authorization": "Bearer coal_sk_thiskeyisnotvalid"},
-        )
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Hi"}]},
+        headers={"Authorization": "Bearer coal_sk_thiskeyisnotvalid"},
+    )
 
     assert response.status_code == 401
     data = response.json()
@@ -193,22 +201,21 @@ async def test_invalid_api_key_returns_401() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_auth_header_returns_401() -> None:
+async def test_missing_auth_header_returns_401(api_client: AsyncClient) -> None:
     """Request with no Authorization header returns 401."""
-    app = create_app()
-
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "Hi"}]},
-        )
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Hi"}]},
+    )
 
     assert response.status_code == 401
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_provider_timeout_returns_structured_error(provisioned_key: dict) -> None:
+async def test_provider_timeout_returns_structured_error(
+    provisioned_key: dict, api_client: AsyncClient
+) -> None:
     """When Ollama times out, COALAI returns a structured 504 error — not a crash."""
     import asyncio
 
@@ -216,22 +223,20 @@ async def test_provider_timeout_returns_structured_error(provisioned_key: dict) 
         await asyncio.sleep(60)
         return httpx.Response(200, json=MOCK_OLLAMA_RESPONSE)
 
-    respx.post("http://ollama:11434/v1/chat/completions").mock(side_effect=slow)
+    respx.post(f"{settings.ollama_base_url.rstrip('/')}/v1/chat/completions").mock(side_effect=slow)
 
     # Use a very short timeout for this test
     import coalai.config as cfg
     original_timeout = cfg.settings.provider_timeout_seconds
     cfg.settings.provider_timeout_seconds = 0.05
 
-    app = create_app()
     try:
-        async with AsyncClient(app=app, base_url="http://test") as client:
-            response = await client.post(
-                "/v1/chat/completions",
-                json={"messages": [{"role": "user", "content": "Hi"}]},
-                headers={"Authorization": f"Bearer {provisioned_key['raw_key']}"},
-                timeout=30.0,
-            )
+        response = await api_client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Hi"}]},
+            headers={"Authorization": f"Bearer {provisioned_key['raw_key']}"},
+            timeout=30.0,
+        )
     finally:
         cfg.settings.provider_timeout_seconds = original_timeout
 

@@ -176,7 +176,7 @@ async def ready(session: AsyncSession = Depends(get_db_session)) -> JSONResponse
 # ── Chat completions ───────────────────────────────────────────────────────────
 
 
-@router.post("/v1/chat/completions", tags=["completions"])
+@router.post("/v1/chat/completions", tags=["completions"], response_model=None)
 async def chat_completions(
     req: ChatCompletionRequest,
     request: Request,

@@ -89,6 +89,21 @@ async def test_write_pending_success(pipeline_ctx: MagicMock, mock_session: Magi
     mock_session.add.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_write_pending_records_selected_provider_and_model(
+    pipeline_ctx: MagicMock, mock_session: MagicMock
+) -> None:
+    """Streaming ledger uses the route selected before the first client chunk."""
+    pipeline_ctx.selected_provider = "groq"
+    pipeline_ctx.selected_model = "llama-3.1-8b-instant"
+
+    await write_pending(pipeline_ctx, estimated_input_tokens=20, session=mock_session)
+
+    record = mock_session.add.call_args.args[0]
+    assert record.provider == "groq"
+    assert record.model_id == "llama-3.1-8b-instant"
+
+
 # ── write_pending DB failure ──────────────────────────────────────────────────
 
 
