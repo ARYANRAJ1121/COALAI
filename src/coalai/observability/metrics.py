@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
+    REGISTRY,
+    CollectorRegistry,
     Counter,
     Gauge,
     Histogram,
     generate_latest,
-    CollectorRegistry,
-    REGISTRY,
 )
 
 if TYPE_CHECKING:
@@ -172,8 +172,8 @@ def record_request_complete(ctx: "PipelineContext", *, status: str) -> None:
     """
     try:
         tenant_id = str(ctx.tenant_id) if ctx.tenant_id else "unknown"
-        provider = ctx.result.provider_used if ctx.result else "unknown"
-        model = ctx.result.model_used if ctx.result else (ctx.model_hint or "unknown")
+        provider = ctx.result.provider_used if ctx.result else (ctx.selected_provider or "unknown")
+        model = ctx.result.model_used if ctx.result else (ctx.selected_model or ctx.model_hint or "unknown")
         stream = str(ctx.stream).lower()
 
         # Request counter
@@ -191,35 +191,30 @@ def record_request_complete(ctx: "PipelineContext", *, status: str) -> None:
                 model=model, provider=provider, stream=stream
             ).observe(total_latency)
 
-        if ctx.result:
-            prov_latency = ctx.result.provider_latency_ms / 1000.0
+        if ctx.result or ctx.provider_started_at:
+            prov_latency = ctx.provider_latency_ms / 1000.0
             if prov_latency > 0:
                 provider_latency_seconds.labels(
                     provider=provider, model=model
                 ).observe(prov_latency)
 
-            # Token counters
-            if ctx.result.input_tokens:
-                tokens_total.labels(
-                    tenant_id=tenant_id, model=model, provider=provider, token_type="input"
-                ).inc(ctx.result.input_tokens)
-                tokens_per_request.labels(
-                    model=model, token_type="input"
-                ).observe(ctx.result.input_tokens)
+        # Token counters (buffered and streaming requests).
+        if ctx.input_tokens:
+            tokens_total.labels(
+                tenant_id=tenant_id, model=model, provider=provider, token_type="input"
+            ).inc(ctx.input_tokens)
+            tokens_per_request.labels(model=model, token_type="input").observe(ctx.input_tokens)
 
-            if ctx.result.output_tokens:
-                tokens_total.labels(
-                    tenant_id=tenant_id, model=model, provider=provider, token_type="output"
-                ).inc(ctx.result.output_tokens)
-                tokens_per_request.labels(
-                    model=model, token_type="output"
-                ).observe(ctx.result.output_tokens)
+        if ctx.output_tokens:
+            tokens_total.labels(
+                tenant_id=tenant_id, model=model, provider=provider, token_type="output"
+            ).inc(ctx.output_tokens)
+            tokens_per_request.labels(model=model, token_type="output").observe(ctx.output_tokens)
 
-            # TTFT (streaming only)
-            if ctx.stream and ctx.result.ttft_ms is not None:
-                ttft_seconds.labels(
-                    provider=provider, model=model
-                ).observe(ctx.result.ttft_ms / 1000.0)
+        # TTFT (streaming only).
+        if ctx.stream and ctx.first_token_at and ctx.provider_started_at:
+            ttft_ms = (ctx.first_token_at - ctx.provider_started_at).total_seconds() * 1000.0
+            ttft_seconds.labels(provider=provider, model=model).observe(ttft_ms / 1000.0)
 
     except Exception:
         # Metrics must never crash a request

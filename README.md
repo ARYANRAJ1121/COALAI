@@ -359,11 +359,11 @@ docker compose logs -f app
 | Milestone | Status | Description |
 |---|---|---|
 | **M1 — Iron Path** | ✅ **Complete** | Auth, Ollama provider, durable accounting, retry, gateway |
-| M2 — Observability | 🔜 | Prometheus metrics, OTEL tracing, Grafana dashboard |
+| M2 — Observability | 🟡 **Partial** | Prometheus metrics and Grafana dashboard exist; OTEL tracing and multi-worker metrics remain |
 | M3 — Exact Cache | 🔜 | Redis exact-match response caching |
 | M4 — Semantic Cache | 🔜 | Embedding-based semantic cache with pgvector |
-| M5 — Multi-Provider | 🔜 | Groq, OpenAI, Anthropic adapters + intelligent routing |
-| M6 — Circuit Breaker | 🔜 | Per-provider circuit breaker with Redis state |
+| M5 — Multi-Provider | 🟡 **Partial** | Ollama, Groq, and OpenRouter adapters exist; provider-aware policy routing and broader adapter coverage remain |
+| M6 — Circuit Breaker | 🟡 **Partial** | In-process circuit breaker exists; shared state for multi-worker deployments remains |
 | M7 — Budget Control | 🔜 | Monetary budget enforcement per tenant |
 | M8 — Admin API | 🔜 | HTTP control plane for tenant/key management |
 

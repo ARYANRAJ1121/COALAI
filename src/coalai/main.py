@@ -14,8 +14,8 @@ accessible from route handlers.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -101,6 +101,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             RouteTarget(provider_id="openrouter", model=settings.openrouter_default_model),
         )
     provider_registry.register_route("default", default_targets)
+    # The default Ollama model is commonly sent explicitly by OpenAI clients.
+    # Route that model through the same fallback chain as the "default" alias.
+    provider_registry.register_route(settings.ollama_default_model, default_targets)
 
     fallback_router = FallbackRouter(
         registry=provider_registry,

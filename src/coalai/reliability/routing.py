@@ -16,7 +16,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from coalai.models.contracts import ExecutionResult, NormalizedChunk, NormalizedRequest, PipelineContext
+from coalai.models.contracts import (
+    ExecutionResult,
+    NormalizedChunk,
+    NormalizedRequest,
+    PipelineContext,
+    utcnow,
+)
 from coalai.models.errors import COALAIError, COALAIErrorType
 from coalai.observability.logging import get_logger
 from coalai.providers.registry import ProviderRegistry, RouteTarget
@@ -24,6 +30,74 @@ from coalai.reliability.circuit_breaker import CircuitBreaker
 from coalai.reliability.retry import RetryPolicy, retry_with_backoff
 
 log = get_logger(__name__)
+
+
+class _TrackedStream:
+    """Track a selected provider stream until it completes or is abandoned."""
+
+    def __init__(
+        self,
+        first_chunk: NormalizedChunk | None,
+        source: AsyncIterator[NormalizedChunk],
+        breaker: CircuitBreaker,
+        key: str,
+        ticket: int,
+        *,
+        complete: bool = False,
+    ) -> None:
+        self._first_chunk = first_chunk
+        self._source = source
+        self._breaker = breaker
+        self._key = key
+        self._ticket = ticket
+        self._closed = complete
+
+    def __aiter__(self) -> _TrackedStream:
+        return self
+
+    async def __anext__(self) -> NormalizedChunk:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._first_chunk is not None:
+            chunk = self._first_chunk
+            self._first_chunk = None
+            return chunk
+
+        try:
+            return await self._source.__anext__()
+        except StopAsyncIteration:
+            self._closed = True
+            self._breaker.record_success(self._key, self._ticket)
+            raise
+        except asyncio.CancelledError:
+            await self.aclose()
+            raise
+        except COALAIError as exc:
+            self._closed = True
+            if exc.retryable:
+                self._breaker.record_failure(self._key, self._ticket, exc)
+            else:
+                self._breaker.release(self._key, self._ticket)
+            await self._close_source()
+            raise
+        except Exception:
+            await self.aclose()
+            raise
+
+    async def _close_source(self) -> None:
+        close = getattr(self._source, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:
+                log.debug("provider_stream_close_failed", target=self._key, exc_info=True)
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._breaker.release(self._key, self._ticket)
+        await self._close_source()
 
 
 class FallbackRouter:
@@ -177,29 +251,24 @@ class FallbackRouter:
                 try:
                     chunk_iter = await provider.stream(normalized_req, timeout_seconds=timeout_seconds)
                     first_chunk = await chunk_iter.__anext__()
-
-                    # First chunk succeeded! Circuit is healthy
-                    self.circuit_breaker.record_success(key, ticket)
-
-                    async def _stream_wrapper() -> AsyncIterator[NormalizedChunk]:
-                        yield first_chunk
-                        try:
-                            async for chunk in chunk_iter:
-                                yield chunk
-                        except Exception as stream_exc:
-                            log.error("mid_stream_failure", target=key, error=str(stream_exc))
-                            raise
-
-                    return _stream_wrapper()
+                    ctx.selected_provider = target.provider_id
+                    ctx.selected_model = target.model
+                    if first_chunk.content and ctx.first_token_at is None:
+                        ctx.first_token_at = utcnow()
+                    return _TrackedStream(first_chunk, chunk_iter, self.circuit_breaker, key, ticket)
 
                 except StopAsyncIteration:
                     self.circuit_breaker.record_success(key, ticket)
-
-                    async def _empty_wrapper() -> AsyncIterator[NormalizedChunk]:
-                        if False:
-                            yield
-
-                    return _empty_wrapper()
+                    ctx.selected_provider = target.provider_id
+                    ctx.selected_model = target.model
+                    return _TrackedStream(
+                        None,
+                        _empty_stream(),
+                        self.circuit_breaker,
+                        key,
+                        ticket,
+                        complete=True,
+                    )
 
                 except asyncio.CancelledError:
                     self.circuit_breaker.release(key, ticket)
@@ -233,3 +302,8 @@ class FallbackRouter:
             f"All streaming provider targets failed. Last error: {last_error.message if last_error else 'none'}",
             http_status=503,
         )
+
+
+async def _empty_stream() -> AsyncIterator[NormalizedChunk]:
+    if False:
+        yield NormalizedChunk(content="", finish_reason=None)

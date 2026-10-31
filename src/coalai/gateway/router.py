@@ -13,7 +13,7 @@ around the pipeline functions.
 
 from __future__ import annotations
 
-import uuid
+import asyncio
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, Request
@@ -25,8 +25,8 @@ from coalai.config import settings
 from coalai.db.session import get_db_session, get_session
 from coalai.gateway import pipeline
 from coalai.gateway.schemas import (
-    ChatCompletionChunk,
     ChatCompletionChoice,
+    ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseMessage,
@@ -41,8 +41,17 @@ from coalai.gateway.schemas import (
 )
 from coalai.models.contracts import PipelineContext, utcnow
 from coalai.models.errors import COALAIError, COALAIErrorType
-from coalai.observability.logging import clear_request_context, get_logger
-from coalai.observability.metrics import get_metrics_response, record_request_complete
+from coalai.observability.logging import (
+    bind_request_context,
+    clear_request_context,
+    get_logger,
+)
+from coalai.observability.metrics import (
+    active_requests,
+    get_metrics_response,
+    record_accounting_failure,
+    record_request_complete,
+)
 from coalai.providers.ollama import OllamaProvider
 from coalai.providers.registry import ProviderRegistry, RouteTarget
 from coalai.reliability.retry import RetryPolicy
@@ -78,6 +87,25 @@ def _error_response(exc: COALAIError, request_id: str | None) -> JSONResponse:
             )
         ).model_dump(),
     )
+
+
+def _finalize_request(ctx: PipelineContext, *, status: str | None = None) -> None:
+    """Record request completion when the response body has actually finished."""
+    ctx.responded_at = utcnow()
+    final_status = status or (
+        "success" if ctx.http_status == 200 else str(getattr(ctx, "_last_error_type", "error"))
+    )
+    try:
+        record_request_complete(ctx, status=final_status)
+        log.info(
+            "request_completed",
+            http_status=ctx.http_status,
+            outcome=final_status,
+            total_latency_ms=round(ctx.total_latency_ms, 1),
+        )
+    finally:
+        active_requests.dec()
+        clear_request_context()
 
 
 def _get_provider(request: Request) -> OllamaProvider:
@@ -119,8 +147,9 @@ async def ready(session: AsyncSession = Depends(get_db_session)) -> JSONResponse
     Readiness probe. Checks PostgreSQL and Redis connectivity.
     Returns 200 only when both are reachable.
     """
-    from coalai.cache.redis_client import redis_ping
     from sqlalchemy import text
+
+    from coalai.cache.redis_client import redis_ping
 
     postgres_ok = False
     redis_ok = False
@@ -160,8 +189,7 @@ async def chat_completions(
     Returns structured JSON errors on all failure cases.
     """
     ctx: PipelineContext | None = None
-
-    from coalai.observability.metrics import active_requests
+    stream_lifecycle_deferred = False
     active_requests.inc()
     try:
         # Extract bearer token (pre-auth — tenant_id NOT in logs yet)
@@ -200,7 +228,7 @@ async def chat_completions(
                 session=session,
             )
         else:
-            return await _handle_streaming(
+            streaming_response = await _handle_streaming(
                 ctx=ctx,
                 model=model,
                 targets=targets,
@@ -208,8 +236,13 @@ async def chat_completions(
                 router=fallback_router,
                 session=session,
             )
+            stream_lifecycle_deferred = True
+            return streaming_response
 
     except COALAIError as exc:
+        if ctx:
+            ctx.http_status = exc.http_status
+            ctx._last_error_type = str(exc.error_type)
         log.warning(
             "request_failed",
             error_type=str(exc.error_type),
@@ -219,6 +252,9 @@ async def chat_completions(
         return _error_response(exc, str(ctx.request_id) if ctx else None)
 
     except Exception as exc:
+        if ctx:
+            ctx.http_status = 500
+            ctx._last_error_type = "internal_error"
         log.exception(
             "unexpected_error",
             request_id=str(ctx.request_id) if ctx else None,
@@ -235,19 +271,16 @@ async def chat_completions(
             ).model_dump(),
         )
     finally:
-        active_requests.dec()
-        if ctx:
-            ctx.responded_at = utcnow()
-            status = "success" if ctx.http_status == 200 else (
-                str(ctx._last_error_type) if hasattr(ctx, "_last_error_type") else "error"
-            )
-            record_request_complete(ctx, status=status)
-            log.info(
-                "request_completed",
-                http_status=ctx.http_status,
-                total_latency_ms=round(ctx.total_latency_ms, 1),
-            )
-        clear_request_context()
+        if not stream_lifecycle_deferred:
+            if ctx:
+                _finalize_request(ctx)
+            else:
+                active_requests.dec()
+                clear_request_context()
+        else:
+            # Streaming runs after this handler returns; the body generator
+            # rebinds the request context when it starts.
+            clear_request_context()
 
 
 async def _handle_buffered(
@@ -339,11 +372,8 @@ async def _handle_streaming(
     # Rough input-token estimate for the PENDING write (char count ÷ 4).
     estimated_input_tokens = sum(len(m.content) for m in ctx.messages) // 4
 
-    # Phase 1: PENDING write — BEFORE any chunk reaches the client.
-    event_id = await pipeline.run_accounting_pending(ctx, estimated_input_tokens, session)
-    await session.commit()
-
-    # Resolve the stream coroutine before entering the generator.
+    # Open the selected route before writing the pending row so fallback
+    # metadata is known and an unavailable provider cannot leave a ghost row.
     stream_iter = await pipeline.execute_stream(
         ctx,
         model=model,
@@ -351,17 +381,42 @@ async def _handle_streaming(
         targets=targets,
         router=router,
     )
+    try:
+        # The provider is selected, but no chunk has been sent to the client.
+        event_id = await pipeline.run_accounting_pending(ctx, estimated_input_tokens, session)
+        await session.commit()
+    except BaseException:
+        close = getattr(stream_iter, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as exc:  # noqa: BLE001 - preserve the accounting failure/cancellation
+                log.warning("provider_stream_close_failed", request_id=str(ctx.request_id), error=str(exc))
+        ctx.first_token_at = None  # The prefetched chunk was never delivered to the client.
+        raise
+
+    selected_model = ctx.selected_model or model
+    ctx.http_status = 200
 
     async def _sse_generator() -> AsyncGenerator[str, None]:
         actual_input_tokens = 0
         actual_output_tokens = 0
+        outcome = "success"
+        if ctx.tenant_context is not None:
+            bind_request_context(
+                request_id=str(ctx.request_id),
+                trace_id=ctx.trace_id,
+                tenant_id=str(ctx.tenant_context.tenant_id),
+            )
 
         try:
             async for chunk in stream_iter:
                 if chunk.content:
+                    if ctx.first_token_at is None:
+                        ctx.first_token_at = utcnow()
                     sse_chunk = ChatCompletionChunk(
                         id=f"chatcmpl-{ctx.request_id}",
-                        model=model,
+                        model=selected_model,
                         choices=[
                             StreamingChoice(
                                 delta=StreamingDelta(content=chunk.content),
@@ -375,23 +430,52 @@ async def _handle_streaming(
 
                 if chunk.input_tokens is not None:
                     actual_input_tokens = chunk.input_tokens
+                    ctx.stream_input_tokens = chunk.input_tokens
                 if chunk.output_tokens is not None:
                     actual_output_tokens = chunk.output_tokens
+                    ctx.stream_output_tokens = chunk.output_tokens
 
+            ctx.provider_completed_at = utcnow()
             yield "data: [DONE]\n\n"
-
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            ctx.provider_completed_at = utcnow()
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider errors are normalized at this boundary
+            outcome = "stream_error"
+            ctx.provider_completed_at = utcnow()
+            log.error("stream_response_failed", request_id=str(ctx.request_id), error=str(exc))
+            raise
         finally:
-            # Phase 2: confirm accounting — uses a fresh session (request session may be closed)
-            async with get_session() as confirm_session:
-                await confirm_pending(
-                    event_id,
-                    actual_input_tokens=actual_input_tokens or estimated_input_tokens,
-                    actual_output_tokens=actual_output_tokens,
-                    estimated_cost_usd=0.0,
-                    session=confirm_session,
+            close = getattr(stream_iter, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception as exc:  # noqa: BLE001 - cleanup must not mask stream outcome
+                    log.warning("provider_stream_close_failed", request_id=str(ctx.request_id), error=str(exc))
+            ctx.stream_input_tokens = actual_input_tokens or estimated_input_tokens
+            ctx.stream_output_tokens = actual_output_tokens
+            try:
+                # Phase 2 uses a fresh session because the request session may be closed.
+                async with get_session() as confirm_session:
+                    await confirm_pending(
+                        event_id,
+                        actual_input_tokens=actual_input_tokens or estimated_input_tokens,
+                        actual_output_tokens=actual_output_tokens,
+                        estimated_cost_usd=0.0,
+                        session=confirm_session,
+                        request_id=str(ctx.request_id),
+                    )
+            except Exception as exc:
+                record_accounting_failure(phase="confirm")
+                log.error(
+                    "accounting_confirmation_session_failed",
+                    event_id=str(event_id),
                     request_id=str(ctx.request_id),
+                    error=str(exc),
                 )
-            ctx.http_status = 200
+            finally:
+                _finalize_request(ctx, status=outcome)
 
     return StreamingResponse(
         _sse_generator(),

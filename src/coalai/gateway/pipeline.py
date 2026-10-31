@@ -30,7 +30,6 @@ from coalai.accounting.service import (
     write_confirmed,
     write_pending,
 )
-from coalai.observability import metrics as m
 from coalai.auth.service import verify_api_key
 from coalai.cache.redis_client import redis_incr_with_expire
 from coalai.config import settings
@@ -44,6 +43,7 @@ from coalai.models.contracts import (
     utcnow,
 )
 from coalai.models.errors import COALAIError, COALAIErrorType
+from coalai.observability import metrics as m
 from coalai.observability.logging import bind_request_context, get_logger
 from coalai.providers.base import LLMProvider
 from coalai.providers.ollama import OllamaProvider
@@ -274,6 +274,7 @@ async def execute_stream(
     """
     Execute streaming completion across target routes with circuit breaker and fallback.
     """
+    ctx.provider_started_at = utcnow()
     if router is not None and targets:
         return await router.stream(
             ctx,
@@ -283,6 +284,8 @@ async def execute_stream(
 
     assert provider is not None
     assert model is not None
+    ctx.selected_provider = provider.provider_id
+    ctx.selected_model = model
     normalized_req = NormalizedRequest(
         messages=ctx.messages,
         model=model,

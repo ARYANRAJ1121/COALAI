@@ -211,6 +211,13 @@ class PipelineContext:
     # ── Set by provider execution ─────────────────────────────────────────────
     result: ExecutionResult | None = None
     all_attempts: list[ExecutionResult] = field(default_factory=list)
+    selected_provider: str | None = None
+    selected_model: str | None = None
+    provider_started_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    first_token_at: datetime | None = None
+    stream_input_tokens: int = 0
+    stream_output_tokens: int = 0
 
     # ── Set by accounting module ──────────────────────────────────────────────
     # v0.3 Option A: accounting_status is None only if the request returned 503
@@ -238,15 +245,19 @@ class PipelineContext:
 
     @property
     def provider_latency_ms(self) -> float:
-        return self.result.provider_latency_ms if self.result else 0.0
+        if self.result:
+            return self.result.provider_latency_ms
+        if self.provider_started_at and self.provider_completed_at:
+            return (self.provider_completed_at - self.provider_started_at).total_seconds() * 1000.0
+        return 0.0
 
     @property
     def input_tokens(self) -> int:
-        return self.result.input_tokens if self.result else 0
+        return self.result.input_tokens if self.result else self.stream_input_tokens
 
     @property
     def output_tokens(self) -> int:
-        return self.result.output_tokens if self.result else 0
+        return self.result.output_tokens if self.result else self.stream_output_tokens
 
     @property
     def estimated_cost_usd(self) -> float:

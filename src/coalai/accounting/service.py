@@ -41,6 +41,7 @@ from coalai.db.models import AccountingLedger
 from coalai.models.contracts import PipelineContext, utcnow
 from coalai.models.errors import COALAIError, COALAIErrorType
 from coalai.observability.logging import get_logger
+from coalai.observability.metrics import record_accounting_failure
 
 log = get_logger(__name__)
 
@@ -98,6 +99,7 @@ async def write_confirmed(
         )
         return event_id
     except SQLAlchemyError as exc:
+        record_accounting_failure(phase="confirmed")
         log.error(
             "accounting_write_failed",
             request_id=str(ctx.request_id),
@@ -129,8 +131,8 @@ async def write_pending(
         event_id=event_id,
         request_id=ctx.request_id,
         tenant_id=ctx.tenant_context.tenant_id,  # type: ignore[union-attr]
-        model_id=ctx.model_hint or "unknown",
-        provider="ollama",  # Phase 5: use route.provider
+        model_id=ctx.selected_model or ctx.model_hint or "unknown",
+        provider=ctx.selected_provider or "unknown",
         input_tokens=estimated_input_tokens,
         output_tokens=0,  # Not yet known; updated in Phase 2
         estimated_cost_usd=0.0,  # Updated in Phase 2
@@ -153,6 +155,7 @@ async def write_pending(
         )
         return event_id
     except SQLAlchemyError as exc:
+        record_accounting_failure(phase="pending")
         log.error(
             "accounting_pending_write_failed",
             request_id=str(ctx.request_id),
@@ -197,6 +200,7 @@ async def confirm_pending(
             output_tokens=actual_output_tokens,
         )
     except SQLAlchemyError as exc:
+        record_accounting_failure(phase="confirm")
         # The PENDING row exists. Reconciliation will promote it.
         # This is NOT a 503 — the client has already received the stream.
         log.error(
