@@ -45,14 +45,15 @@ Client
 │       → Respond                             │
 └────────────────┬────────────────────────────┘
                  │
-         ┌───────┴───────┐
-         │               │
-      Ollama          (future:
-   (local/free)     OpenAI, Groq...)
-         │
-    PostgreSQL          Redis
-  (accounting        (auth cache,
-    ledger)          rate limits)
+         ┌───────────────┴────────────────┐
+         │                                │
+ Ollama (local primary)      Groq / OpenRouter (optional)
+         │                                │
+         └───────────────┬────────────────┘
+                         │
+                 PostgreSQL + Redis
+              (usage ledger, auth cache,
+                   rate limits)
 ```
 
 ### Key Design Decisions
@@ -62,7 +63,8 @@ Client
 | **Strong accounting consistency** | A `200 OK` is never returned unless a durable accounting row exists in PostgreSQL. If the write fails, COALAI returns `503` rather than silently losing usage data. |
 | **Fail-open Redis** | Redis failures never block requests. Rate limiting, auth cache, and circuit breaker all degrade gracefully if Redis is down. |
 | **Unified error taxonomy** | All internal errors are `COALAIError` with a typed `error_type`. Provider-specific exceptions never cross adapter boundaries. |
-| **No fire-and-forget** | Streaming uses a two-phase write: `PENDING` before the first chunk, `CONFIRMED` after the stream ends. A reconciliation job covers the gap. |
+| **Default-route fallback** | The `default` alias and configured default Ollama model use the ordered fallback chain. Other explicit model IDs use their registered route or Ollama directly. |
+| **Streaming accounting** | A `PENDING` row is committed before any stream chunk is sent, then updated with usage after the stream ends. A background reconciliation worker for rows that remain pending is still planned. |
 | **No Admin HTTP API in MVP** | Tenants and keys are provisioned via CLI script. Reduces attack surface and scope for Milestone 1. |
 
 ---
@@ -298,6 +300,8 @@ All configuration is via environment variables. Copy `.env.example` to `.env`.
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2:3b` | Fallback model when none specified |
+| `GROQ_ENABLED` / `GROQ_API_KEY` | `false` / empty | Opt in to Groq as a fallback provider |
+| `OPENROUTER_ENABLED` / `OPENROUTER_API_KEY` | `false` / empty | Opt in to OpenRouter as a fallback provider |
 | `PROVIDER_TIMEOUT_SECONDS` | `30.0` | Provider call timeout |
 | `PROVIDER_STREAMING_TIMEOUT_SECONDS` | `300.0` | Streaming timeout |
 | `RETRY_MAX_ATTEMPTS` | `3` | Max retry attempts per request |
